@@ -1,4 +1,10 @@
 Metadata-Version: 2.1
 Name: mergefiles
-Version: 0.1
+Version: 0.2
+Summary: A utility to merge multiple directories into a single directory, with advanced options for merge conflicts
+Author: Björn Ahlgren
+Author-email: bjorn.victor.ahlgren@gmail.com
+Classifier: Development Status :: 3 - Alpha
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
 License-File: LICENSE

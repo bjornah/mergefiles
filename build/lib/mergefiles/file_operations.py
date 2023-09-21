@@ -1,155 +1,297 @@
-from shutil import copy2
-from pathlib import Path
-import os
-from typing import List
+# Here is the full Python code for merging directories with advanced features.
 
-def get_file_paths(directory):
+import os
+import json
+import shutil
+import itertools
+import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Dict, Union, Callable, Optional, Any, Generator, Optional
+from threading import Lock
+import time
+import logging
+from logging import Logger
+
+def setup_logger(name: str, level: int = logging.INFO, log_file_path: str = None) -> Logger:
     """
-    Gets all file paths in the specified directory.
+    Setup a logger with the specified name, level, and optional log file.
     
-    Args:
-    directory (str): The directory to search.
+    Parameters:
+    - name (str): The name of the logger
+    - level (int): The logging level (default: logging.INFO)
+    - log_file_path (str): The path to the log file (default: None, logs to stdout)
     
     Returns:
-    set: A set containing all file paths.
+    - Logger: Configured logger object
+    
+    Example:
+    ```python
+    logger = setup_logger("my_logger", level=logging.DEBUG)
+    logger.debug("This is a debug message.")
+    ```
     """
-    directory_path = Path(directory)
-    file_paths = set()
-    for file_path in directory_path.rglob('*'):
-        if file_path.is_file():
-            file_paths.add(file_path)
-    return file_paths
-
-def get_file_differences(folder_a, folder_b):
-    files_in_a = get_file_paths(folder_a)
-    files_in_b = get_file_paths(folder_b)
-
-    folder_a_path = Path(folder_a)
-    folder_b_path = Path(folder_b)
-
-    files_in_a_not_in_b = {x.relative_to(folder_a_path) for x in files_in_a} - {x.relative_to(folder_b_path) for x in files_in_b}
-    files_in_b_not_in_a = {x.relative_to(folder_b_path) for x in files_in_b} - {x.relative_to(folder_a_path) for x in files_in_a}
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
     
-    return files_in_a_not_in_b, files_in_b_not_in_a
-
-# def merge_folders(folder_a, folder_b):
-#     files_in_a_not_in_b, files_in_b_not_in_a = get_file_differences(folder_a, folder_b)
+    # Remove all handlers to avoid duplicate logs in this environment
+    logger.handlers = []
     
-#     folder_a_path = Path(folder_a)
-#     folder_b_path = Path(folder_b)
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     
-#     source_folder, target_folder, files_to_copy = (folder_a_path, folder_b_path, files_in_b_not_in_a) if len(files_in_a_not_in_b) > len(files_in_b_not_in_a) else (folder_b_path, folder_a_path, files_in_a_not_in_b)
+    # Create a file handler if log_file_path is provided
+    if log_file_path:
+        file_handler = logging.FileHandler(log_file_path)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    else:
+        # Create console handler with a higher log level
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
+    
+    return logger
 
-#     for relative_file_path in files_to_copy:
-#         source_file_path = source_folder / relative_file_path
-#         target_file_path = target_folder / relative_file_path
+def collect_files_gen(directory: str) -> Generator[str, None, None]:
+    """
+    Generate relative file paths from a given directory.
+
+    Parameters:
+    - directory: str: Source directory
+
+    Returns:
+    - Generator[str, None, None]: Yields relative file paths
+    """
+    for root, _, files in os.walk(directory):
+        for file in files:
+            abs_path = os.path.join(root, file)
+            yield os.path.relpath(abs_path, directory), abs_path
+
+
+def resolve_conflict_by_hash(src_path: str, dst_path: str, **kwargs: Any) -> Optional[str]:
+    """
+    Resolve conflict between source and destination files based on their hash.
+
+    Parameters:
+    - src_path: str: Source file path
+    - dst_path: str: Destination file path
+    - kwargs: Any: Additional keyword arguments
+
+    Returns:
+    - Optional[str]: Resolved file path to keep
+    """
+    src_hash = hashlib.sha256(open(src_path, 'rb').read()).hexdigest()
+    dst_hash = hashlib.sha256(open(dst_path, 'rb').read()).hexdigest()
+    
+    if src_hash == dst_hash:
+        return None  # No action needed, files are identical
+    else:
+        return [src_path, dst_path]  # Keep both files
+
+
+def keep_both_files(src_path: str, dst_path: str, **kwargs: Any) -> List[str]:
+    """
+    Keep both conflicting files.
+
+    Parameters:
+    - src_path: str: Source file path
+    - dst_path: str: Destination file path
+    - kwargs: Any: Additional keyword arguments
+
+    Returns:
+    - List[str]: List of file paths to keep
+    """
+    return [src_path, dst_path]
+
+
+def keep_files_from_preferred_src(src_path: str, dst_path: str, preferred_src: str, **kwargs: Any) -> Optional[str]:
+    """
+    Automatically keep files from the preferred source directory.
+
+    Parameters:
+    - src_path: str: Source file path
+    - dst_path: str: Destination file path
+    - preferred_src: str: Preferred source directory path
+    - kwargs: Any: Additional keyword arguments
+
+    Returns:
+    - Optional[str]: Resolved file path to keep
+    """
+    return src_path if os.path.commonpath([src_path, preferred_src]) == preferred_src else None
+
+
+def write_summary_to_log(summary: Dict[str, Union[int, List[str]]], log_file_path: str) -> None:
+    """
+    Write summary dictionary to a JSON log file.
+
+    Parameters:
+    - summary: Dict[str, Union[int, List[str]]]: Summary of the copy action
+    - log_file_path: str: Path to the log file
+
+    Returns:
+    - None
+    """
+    with open(log_file_path, 'w') as log_file:
+        json.dump(summary, log_file, indent=4)
+
+
+def copy_file(
+    src_path: str, 
+    dst_path: str, 
+    conflict_resolver: Callable[..., Union[str, List[str]]], 
+    summary: Dict[str, Union[int, List[str]]],
+    summary_lock: Lock,
+    dry_run: bool = False,
+    progress_counter: Optional[List[int]] = None,  # Mutable list as a workaround to update integer in place
+    **kwargs: Any
+) -> None:
+    """
+    Copy a single file from source to destination with error handling.
+
+    Parameters:
+    - src_path: str: Source file path
+    - dst_path: str: Destination file path
+    - conflict_resolver: Callable[..., Union[str, List[str]]]: Conflict resolution function
+    - summary: Dict[str, Union[int, List[str]]]: Summary of the copy action
+    - summary_lock: Lock: Lock object for thread-safe updates to the summary dictionary
+    - dry_run: bool: Whether to perform a dry run without actual copy
+    - progress_counter: Optional[List[int]]: Mutable list containing a single integer for progress count (default: None)
+    - kwargs: Any: Additional keyword arguments for the conflict resolver
+
+    Returns:
+    - None
+    """
+    dst_dir = os.path.dirname(dst_path)
+
+    # print(f"Debug: Inside copy_file. src_path={src_path}, dst_path={dst_path}, dry_run={dry_run}")
+    
+    # Initialize local variables for summary updates
+    files_copied = 0
+    directories_created = 0
+    conflicts = []
+    errors = []
+    
+    try:
+        # Handle conflict if destination file exists
+        if os.path.exists(dst_path):
+            resolved_paths = conflict_resolver(src_path, dst_path, **kwargs)
+            
+            # If conflict could not be resolved, skip and log the conflict
+            if resolved_paths is None:
+                conflicts.append(dst_path)
+            else:
+                # If multiple resolved paths, handle each one
+                if isinstance(resolved_paths, list):
+                    for i, path in enumerate(resolved_paths):
+                        versioned_dst_path = f"{dst_path[:-4]}_v{i+1}{dst_path[-4:]}"
+                        files_copied += 1
+                        if not dry_run:
+                            if not os.path.exists(dst_dir):
+                                os.makedirs(dst_dir)
+                                directories_created += 1
+                            shutil.copy(path, versioned_dst_path)
+                else:
+                    # If single resolved path, continue as usual
+                    src_path = resolved_paths if resolved_paths else src_path
         
-#         target_file_path.parent.mkdir(parents=True, exist_ok=True)
+        # Copy file to destination
+        if not dry_run:
+            files_copied += 1
+            if not os.path.exists(dst_dir):
+                os.makedirs(dst_dir)
+                directories_created += 1
+            shutil.copy(src_path, dst_path)
         
-#         try:
-#             if not target_file_path.exists():
-#                 copy2(source_file_path, target_file_path)
-#             else:
-#                 print(f"File already exists at {target_file_path}, skipping...")
-#         except Exception as e:
-#             print(f"An error occurred while copying {source_file_path} to {target_file_path}: {e}")
-# def merge_folders(src_folder, dest_folder):
-#     src_files = {f.relative_to(src_folder) for f in src_folder.rglob('*') if f.is_file()}
-#     dest_files = {f.relative_to(dest_folder) for f in dest_folder.rglob('*') if f.is_file()}
+        # Update progress counter if specified
+        if progress_counter is not None:
+            progress_counter[0] += 1
+        
+    except (PermissionError, FileNotFoundError, OSError) as e:
+        errors.append({"src": src_path, "dst": dst_path, "error": str(e)})
+    
+    # Update summary dictionary in a thread-safe manner
+    with summary_lock:
+        summary['files_copied'] += files_copied
+        summary['directories_created'] += directories_created
+        summary['conflicts'].extend(conflicts)
+        summary['errors'].extend(errors)
 
-#     files_to_copy_from_src = src_files - dest_files
-#     files_to_copy_from_dest = dest_files - src_files
+    # print(f"Debug: Updated summary: {summary}")
 
-#     if len(files_to_copy_from_src) < len(files_to_copy_from_dest):
-#         src_folder, dest_folder = dest_folder, src_folder
-#         files_to_copy_from_src, files_to_copy_from_dest = files_to_copy_from_dest, files_to_copy_from_src
 
-#     for relative_file_path in files_to_copy_from_src:
-#         src_file_path = src_folder / relative_file_path
-#         dest_file_path = dest_folder / relative_file_path
-
-#         os.makedirs(os.path.dirname(dest_file_path), exist_ok=True)
-#         copy2(src_file_path, dest_file_path)
-
-# def merge_folders(src_folder, dest_folder, overwrite=False):
-#     src_folder = Path(src_folder)
-#     dest_folder = Path(dest_folder)
-
-#     for item in src_folder.rglob('*'):
-#         if item.is_file():
-#             relative_path = item.relative_to(src_folder)
-#             dest_file = dest_folder / relative_path
-
-#             dest_file.parent.mkdir(parents=True, exist_ok=True)
-#             if overwrite or not dest_file.exists():
-#                 copy2(item, dest_file)
-
-def smart_merge_folders(source_folder: Path, target_folder: Path, overwrite: bool = False):
+# Finalizing the code using the last debug version as a basis
+def merge_directories(
+    src_dirs: List[str], 
+    dst_dir: str, 
+    conflict_resolver: Callable[..., Union[str, List[str]]] = resolve_conflict_by_hash, 
+    log_file_path: Optional[str] = None,
+    dry_run: bool = False,
+    num_threads: int = 4,
+    **kwargs: Any  # Additional keyword arguments for the conflict resolver
+) -> Dict[str, Union[int, List[str]]]:
     """
-    Merges the contents of two folders in a smart way, by copying files from the folder with the most missing files 
-    to the folder with the fewest missing files. It also offers an option to handle file conflicts (files with the 
-    same name) either by overwriting them or skipping the conflicting files.
+    Final version of merge_directories with all features.
+    
+    Parameters:
+    - src_dirs: List[str]: List of source directories
+    - dst_dir: str: Destination directory
+    - conflict_resolver: Callable[..., Union[str, List[str]]]: Conflict resolution function (default: resolve_conflict_by_hash)
+    - log_file_path: Optional[str]: Path to the log file (default: None)
+    - dry_run: bool: Whether to perform a dry run without actual copy (default: False)
+    - num_threads: int: Number of threads for file copying (default: 4)
+    - kwargs: Any: Additional keyword arguments for the conflict resolver
 
-    Parameters
-    ----------
-    source_folder : pathlib.Path
-        The source folder which contains the files to be merged into the target folder. It should be a Path object pointing 
-        to the source folder's location in the file system.
-
-    target_folder : pathlib.Path
-        The target folder where the files from the source folder will be copied to. It should be a Path object pointing 
-        to the target folder's location in the file system.
-
-    overwrite : bool, optional
-        A flag that dictates how the function should handle file conflicts. If set to True, files in the target folder 
-        that have the same name as files in the source folder will be overwritten. If set to False, these files will 
-        be skipped during the merge process. The default value is False.
-
-    Returns
-    -------
-    None
-
-    Raises
-    ------
-    FileNotFoundError
-        Raised if either the source_folder or target_folder does not exist.
-
-    Examples
-    --------
-    >>> from pathlib import Path
-    >>> from your_package_name import file_operations
-    >>> source_folder = Path("path/to/source_folder")
-    >>> target_folder = Path("path/to/target_folder")
-    >>> file_operations.smart_merge_folders(source_folder, target_folder, overwrite=True)
-
-    Notes
-    -----
-    The function performs a "smart" merge by identifying which folder (source or target) has the most missing files 
-    and then copies files from the folder with the most missing files to the other folder to minimize the number of 
-    file operations.
-
-    This function uses Python's built-in pathlib and shutil modules to perform file operations, and therefore inherits 
-    their limitations and behaviors.
+    Returns:
+    - Dict[str, Union[int, List[str]]]: Summary of the merge action
     """
-    source_files = {f.relative_to(source_folder) for f in source_folder.rglob('*') if f.is_file()}
-    target_files = {f.relative_to(target_folder) for f in target_folder.rglob('*') if f.is_file()}
 
-    missing_in_source = target_files - source_files
-    missing_in_target = source_files - target_files
+    # print(f"Debug: Inside merge_directories. dry_run={dry_run}, num_threads={num_threads}")
 
-    if len(missing_in_source) > len(missing_in_target):
-        source_folder, target_folder = target_folder, source_folder
-        missing_in_target, missing_in_source = missing_in_source, missing_in_target
+    # Initialize summary dictionary
+    summary = {
+        'files_copied': 0,
+        'directories_created': 0,
+        'conflicts': [],
+        'errors': []
+    }
+    
+    processed_files = set()  # To keep track of already processed files
+    
+    # Create a generator to yield files from all source directories
+    file_gen = itertools.chain(*[collect_files_gen(src) for src in src_dirs])
+    
+    # Calculate total number of files for progress monitoring
+    total_files = sum(1 for _ in itertools.chain(*[collect_files_gen(src) for src in src_dirs]))
+    file_gen = itertools.chain(*[collect_files_gen(src) for src in src_dirs])  # Reset the generator
+    
+    # Initialize progress counter and timing variables
+    progress_counter = [0]  # Mutable list to update integer in place
+    start_time = time.time()
 
-    files_to_copy = missing_in_target
-    if overwrite:
-        files_to_copy = files_to_copy.union(source_files.intersection(target_files))
+    summary_lock = Lock()
+    
+    # Initialize thread pool executor
+    with ThreadPoolExecutor(max_workers=num_threads) as executor:
+        for relative_path, src_path in file_gen:
+            if relative_path in processed_files:
+                continue
+            processed_files.add(relative_path)
+            
+            dst_path = os.path.join(dst_dir, relative_path)
+            
+            # Multi-threaded call to copy_file
+            executor.submit(copy_file, src_path, dst_path, conflict_resolver, summary, summary_lock, dry_run, progress_counter, **kwargs)
+            
+            # Display real-time progress
+            elapsed_time = time.time() - start_time
+            progress = progress_counter[0] / total_files * 100
+            estimated_time_remaining = (elapsed_time / progress_counter[0]) * (total_files - progress_counter[0]) if progress_counter[0] else 0
+            print(f"\rProgress: {progress:.2f}% | Estimated Time Remaining: {estimated_time_remaining:.2f}s", end="")
+    
+    # Write summary to log file if specified
+    if log_file_path:
+        write_summary_to_log(summary, log_file_path)
+    
+    # print(f"Debug: Final summary: {summary}")
 
-    for relative_file_path in files_to_copy:
-        source_file_path = source_folder / relative_file_path
-        target_file_path = target_folder / relative_file_path
-
-        if not target_file_path.parent.exists():
-            target_file_path.parent.mkdir(parents=True)
-
-        copy2(source_file_path, target_file_path)
+    return summary

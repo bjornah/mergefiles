@@ -1,18 +1,9 @@
-# Folder Merging Package
+
+# MergeFiles
 
 ## Description
 
-This Python package provides utilities for merging two folders in a smart way, considering file discrepancies between them. It allows for the merging of folders with an option to overwrite or retain files with identical names.
-
-## Features
-
-1. **Smart Folder Merging**
-   - Merge folders by considering the missing files in each folder.
-   - Option to overwrite or retain files with identical names during the merge.
-   
-2. **File Operations**
-   - Contains utilities for identifying files present in one folder but missing in another.
-   - Functionality to copy files from one folder to another considering various parameters.
+`mergefiles` is a Python package that provides utilities to merge multiple directories into a single directory.
 
 ## Installation
 
@@ -24,22 +15,22 @@ To install the package, follow these steps:
 
 3. Install the package using pip: `pip install .`
 
-
 ## Usage
 
-Here's a simple usage example demonstrating how to use the `smart_merge_folders` function from the `file_operations` module:
+```python
+from mergefiles.core import merge_directories
 
-    from mypackage import file_operations
-    from pathlib import Path
+src_dirs = ["src1", "src2"]
+dst_dir = "dst"
+merge_directories(src_dirs, dst_dir)
+```
 
-    # Define the paths to your folders
-    folder_a = Path("/path/to/folder_a")
-    folder_b = Path("/path/to/folder_b")
+## Features
 
-    # Perform a smart merge with overwrite option enabled
-    file_operations.smart_merge_folders(folder_a, folder_b, overwrite=True)
+- Merge multiple source directories into a single destination directory
+- Conflict resolution strategies
+- Multi-threaded file copying for improved performance
 
-## Running tests
-To run the tests, navigate to the package directory and execute the following command: `pytest`
-This will run all the test cases present in the tests directory and provide a summary of the test results.
+## License
 
+None

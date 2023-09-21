@@ -2,11 +2,12 @@ LICENSE
 README.md
 setup.py
 mergefiles/__init__.py
-mergefiles/file_operations.py
+mergefiles/cli.py
+mergefiles/core.py
+mergefiles/utils.py
 mergefiles.egg-info/PKG-INFO
 mergefiles.egg-info/SOURCES.txt
 mergefiles.egg-info/dependency_links.txt
-mergefiles.egg-info/requires.txt
 mergefiles.egg-info/top_level.txt
 tests/__init__.py
-tests/test_file_operations.py
+tests/test_core.py
